@@ -8,6 +8,7 @@ import time
 from typing import Optional, Dict, Any, Union, List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -1012,6 +1013,12 @@ async def monitor_loop(application):
                         except Exception as e:
                             await application.bot.send_message(int(uid_str), f"❌ Forward failed: {str(e)}")
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, Conflict):
+        logger.warning("⚠️ Conflict: Another instance of this bot is running with the same token! Please ensure only ONE bot instance runs at a time.")
+    else:
+        logger.error(f"Exception handling update: {context.error}")
+
 # ---------------------------- Main ------------------------------------------
 def main():
     application = Application.builder().token(TOKEN).build()
@@ -1045,6 +1052,8 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, text_router))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL, handle_channel_post))
     application.add_handler(MessageHandler(filters.ChatType.GROUPS, handle_channel_post))
+    # Error handler
+    application.add_error_handler(error_handler)
     application.run_polling()
 
 if __name__ == "__main__":
