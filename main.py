@@ -18,7 +18,7 @@ from telegram.ext import (
 )
 
 # ---------------------------- Configuration ---------------------------------
-TOKEN = "8601619894:AAGCEbKN7DFIBLmxcmXMnX48SdrhElYU_80"  # Replace with your bot token
+TOKEN = "8948519639:AAHH3PArfOskunJT0DQIwItb5jSaZ_zrnkQ"  # Replace with your bot token
 DATA_FILE = "user_data.json"
 POLL_INTERVAL = 5
 AUTO_PAUSE_MINUTES = 5
