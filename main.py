@@ -20,7 +20,7 @@ from telegram.ext import (
 # ---------------------------- Configuration ---------------------------------
 TOKEN = "8948519639:AAHH3PArfOskunJT0DQIwItb5jSaZ_zrnkQ"  # Replace with your bot token
 DATA_FILE = "user_data.json"
-POLL_INTERVAL = 1
+POLL_INTERVAL = 0.4
 AUTO_PAUSE_MINUTES = 5
 
 # Owner IDs (hardcoded)
