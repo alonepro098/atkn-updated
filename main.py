@@ -19,9 +19,9 @@ from telegram.ext import (
 )
 
 # ---------------------------- Configuration ---------------------------------
-TOKEN = "8948519639:AAHH3PArfOskunJT0DQIwItb5jSaZ_zrnkQ"  # Replace with your bot token
+TOKEN = os.getenv("BOT_TOKEN", "8948519639:AAHH3PArfOskunJT0DQIwItb5jSaZ_zrnkQ")  # Replace with your bot token or set BOT_TOKEN env var
 DATA_FILE = "user_data.json"
-POLL_INTERVAL = 0.4
+POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "0.5"))
 AUTO_PAUSE_MINUTES = 5
 
 # Owner IDs (hardcoded)
@@ -62,6 +62,11 @@ def get_user(user_id: int) -> dict:
             "last_seen_time": 0,
         }
         save_user_data(user_data)
+    else:
+        usr = user_data[uid]
+        if isinstance(usr, dict) and "response_format" not in usr:
+            usr["response_format"] = "new"
+            save_user_data(user_data)
     return user_data[uid]
 
 def save_user(uid: str, data: dict) -> None:
@@ -120,25 +125,44 @@ _session: Optional[aiohttp.ClientSession] = None
 
 async def get_http_session() -> aiohttp.ClientSession:
     global _session
-    if _session is None or _session.closed:
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if _session is None or _session.closed or getattr(_session, '_loop', None) != current_loop:
+        if _session and not _session.closed:
+            try:
+                await _session.close()
+            except Exception:
+                pass
         timeout = aiohttp.ClientTimeout(total=5)
         _session = aiohttp.ClientSession(timeout=timeout)
     return _session
 
+def get_auth_query(secret: str) -> str:
+    if not secret:
+        return ""
+    clean_secret = secret.strip()
+    if clean_secret and clean_secret not in ("default_secret", "secret", "none"):
+        return f"?auth={clean_secret}"
+    return ""
+
 async def firebase_get(url: str, secret: str, path: str) -> Optional[dict]:
     base = url.rstrip('/')
-    auth = f"?auth={secret}" if secret else ""
+    auth = get_auth_query(secret)
     session = await get_http_session()
     async with session.get(f"{base}/{path}.json{auth}") as resp:
         if resp.status == 404:
             return None
         if resp.status != 200:
-            raise Exception(f"Firebase GET error {resp.status}")
+            resp_text = await resp.text()
+            raise Exception(f"Firebase GET error {resp.status}: {resp_text[:150]}")
         return await resp.json()
 
 async def firebase_put(url: str, secret: str, path: str, data: dict) -> dict:
     base = url.rstrip('/')
-    auth = f"?auth={secret}" if secret else ""
+    auth = get_auth_query(secret)
     full_url = f"{base}/{path}.json{auth}"
     logger.info(f"Firebase PUT to: {full_url}")
     logger.info(f"Payload: {json.dumps(data)}")
@@ -147,7 +171,7 @@ async def firebase_put(url: str, secret: str, path: str, data: dict) -> dict:
         response_text = await resp.text()
         logger.info(f"Firebase response status: {resp.status}, body: {response_text[:200]}")
         if resp.status not in (200, 201):
-            raise Exception(f"Firebase PUT error {resp.status}: {response_text}")
+            raise Exception(f"Firebase PUT error {resp.status}: {response_text[:150]}")
         return await resp.json() if response_text else {}
 
 async def send_sms_to_firebase(url: str, secret: str, device_id: str, to: str, message: str, from_sim: Union[int, str]) -> dict:
