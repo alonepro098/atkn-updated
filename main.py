@@ -19,10 +19,10 @@ from telegram.ext import (
 )
 
 # ---------------------------- Configuration ---------------------------------
-TOKEN = os.getenv("BOT_TOKEN", "8948519639:AAHH3PArfOskunJT0DQIwItb5jSaZ_zrnkQ")  # Replace with your bot token or set BOT_TOKEN env var
+TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")  # Replace with your Telegram Bot token from @BotFather
 DATA_FILE = "user_data.json"
 POLL_INTERVAL = float(os.getenv("POLL_INTERVAL", "0.5"))
-AUTO_PAUSE_MINUTES = 5
+AUTO_PAUSE_MINUTES = 10
 
 # Owner IDs (hardcoded)
 OWNER_IDS = {5311223486, 7759665144}  # Telegram user IDs
@@ -1045,6 +1045,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # ---------------------------- Main ------------------------------------------
 def main():
+    if TOKEN == "YOUR_BOT_TOKEN_HERE" or not TOKEN or not TOKEN.strip():
+        logger.error("❌ ERROR: Please set your Telegram Bot Token in main.py (line 22) or set BOT_TOKEN environment variable!")
+        print("\n❌ ERROR: Please set your Telegram Bot Token in main.py (line 22) or set BOT_TOKEN environment variable!\n")
+        return
     application = Application.builder().token(TOKEN).build()
     # Command handlers
     application.add_handler(CommandHandler("start", start))
